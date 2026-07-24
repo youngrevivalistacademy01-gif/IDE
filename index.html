@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Anvil — code, anywhere</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app" class="app">
+
+    <!-- Top bar -->
+    <header class="topbar">
+      <button id="toggleSidebar" class="icon-btn" aria-label="Toggle file explorer" title="Files">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M3 5h18v2H3V5zm0 6h18v2H3v-2zm0 6h18v2H3v-2z"/></svg>
+      </button>
+      <div class="brand">
+        <span class="brand-mark">⌂</span>
+        <span class="brand-name">Anvil</span>
+      </div>
+      <div class="topbar-spacer"></div>
+      <button id="toggleSplit" class="icon-btn" aria-label="Toggle preview" title="Toggle preview">Preview</button>
+      <button id="saveIndicator" class="icon-btn saved" title="All changes saved">●</button>
+    </header>
+
+    <div class="workspace">
+      <!-- Sidebar: file explorer -->
+      <aside id="sidebar" class="sidebar">
+        <div class="sidebar-actions">
+          <button id="newFileBtn" class="mini-btn" title="New file">+ File</button>
+          <button id="newFolderBtn" class="mini-btn" title="New folder">+ Folder</button>
+        </div>
+        <div id="fileTree" class="file-tree" role="tree" aria-label="Project files"></div>
+      </aside>
+
+      <!-- Main editor column -->
+      <main class="main">
+        <div id="tabBar" class="tab-bar" role="tablist"></div>
+        <div class="panes">
+          <div id="editorPane" class="editor-pane"></div>
+          <div id="previewPane" class="preview-pane hidden">
+            <iframe id="previewFrame" title="Live preview" sandbox="allow-scripts allow-forms allow-modals allow-popups"></iframe>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <!-- Touch accessory bar — the whole reason this isn't just a phone-sized VS Code -->
+    <div id="accessoryBar" class="accessory-bar" aria-label="Symbol quick-insert bar">
+      <button data-insert="\t" title="Tab">⇥</button>
+      <button data-insert="{}" data-cursor-offset="1">{ }</button>
+      <button data-insert="()" data-cursor-offset="1">( )</button>
+      <button data-insert="[]" data-cursor-offset="1">[ ]</button>
+      <button data-insert='""' data-cursor-offset="1">" "</button>
+      <button data-insert="''" data-cursor-offset="1">' '</button>
+      <button data-insert=";">;</button>
+      <button data-insert=":">:</button>
+      <button data-insert="=&gt;">=&gt;</button>
+      <button data-insert="/">/</button>
+      <button data-insert="-">-</button>
+      <button data-insert="_">_</button>
+      <button data-move="left" title="Left">←</button>
+      <button data-move="right" title="Right">→</button>
+      <button data-move="up" title="Up">↑</button>
+      <button data-move="down" title="Down">↓</button>
+      <button data-action="undo" title="Undo">↺</button>
+      <button data-action="redo" title="Redo">↻</button>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
