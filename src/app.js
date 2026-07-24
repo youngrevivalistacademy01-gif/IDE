@@ -17,26 +17,60 @@ const state = {
 };
 
 // ---------------------------------------------------------------------------
-// Persistence (debounced editor autosave)
+// Persistence. A pure debounce isn't safe on a tablet: switching apps can
+// suspend or kill the tab before a setTimeout ever fires, and any edit since
+// the last flush is lost with it. So autosave here is a *flushable* pending
+// write: the debounce just controls how chatty IndexedDB writes are while
+// you're actively typing, and every path that can end the session
+// (backgrounding the tab, closing it, switching apps) forces an immediate
+// flush of whatever's pending — see wireLifecycleFlush() below.
 // ---------------------------------------------------------------------------
 let saveTimer = null;
+let pending = null; // { path, content } — the most recent unsaved edit, if any
+
 function scheduleSave(path, content) {
+  pending = { path, content };
   state.dirty.add(path);
   setSaveIndicator("saving");
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(async () => {
-    try {
-      await state.vfs.writeFile(path, content);
-      const f = state.files.get(path);
-      if (f) f.content = content;
-      state.dirty.delete(path);
-      renderTabs();
-      if (state.dirty.size === 0) setSaveIndicator("saved");
-    } catch (err) {
-      console.error("Save failed:", err);
-      setSaveIndicator("error");
+  saveTimer = setTimeout(flushPendingSave, 250);
+}
+
+async function flushPendingSave() {
+  clearTimeout(saveTimer);
+  if (!pending) return;
+  const { path, content } = pending;
+  pending = null;
+  try {
+    await state.vfs.writeFile(path, content);
+    const f = state.files.get(path);
+    if (f) f.content = content;
+    state.dirty.delete(path);
+    renderTabs();
+    if (state.dirty.size === 0) setSaveIndicator("saved");
+  } catch (err) {
+    console.error("Save failed:", err);
+    setSaveIndicator("error");
+  }
+}
+
+// Force a save on every event that can precede the tab dying: losing
+// visibility (app-switch on tablets), losing focus, or actually unloading.
+function wireLifecycleFlush() {
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) flushPendingSave();
+  });
+  window.addEventListener("pagehide", flushPendingSave);
+  window.addEventListener("blur", flushPendingSave);
+  window.addEventListener("beforeunload", flushPendingSave);
+
+  // Explicit manual save — Ctrl/Cmd+S — for anyone using a keyboard case.
+  window.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      flushPendingSave();
     }
-  }, 400);
+  });
 }
 
 function setSaveIndicator(status) {
@@ -220,6 +254,8 @@ function wireChrome() {
 
   document.getElementById("toggleTheme").addEventListener("click", toggleTheme);
 
+  document.getElementById("saveIndicator").addEventListener("click", () => flushPendingSave());
+
   const fsBtn = document.getElementById("fullscreenPreview");
   fsBtn.addEventListener("click", () => {
     const pane = document.getElementById("previewPane");
@@ -275,9 +311,17 @@ function wireChrome() {
 // empty until the person creates something.
 // ---------------------------------------------------------------------------
 async function boot() {
+  // Ask the browser not to evict this site's storage under pressure — Safari
+  // in particular can otherwise clear IndexedDB for tabs that go a while
+  // without user interaction, which looks exactly like "my work vanished".
+  if (navigator.storage?.persist) {
+    try { await navigator.storage.persist(); } catch { /* best-effort */ }
+  }
+
   state.vfs = await VFS.create();
   await loadFiles();
   applyTheme();
+  wireLifecycleFlush();
 
   state.tree = new FileTree(document.getElementById("fileTree"), state.vfs, {
     getFiles: () => state.files,
