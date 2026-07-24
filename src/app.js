@@ -17,58 +17,55 @@ const state = {
 };
 
 // ---------------------------------------------------------------------------
-// Persistence. A pure debounce isn't safe on a tablet: switching apps can
-// suspend or kill the tab before a setTimeout ever fires, and any edit since
-// the last flush is lost with it. So autosave here is a *flushable* pending
-// write: the debounce just controls how chatty IndexedDB writes are while
-// you're actively typing, and every path that can end the session
-// (backgrounding the tab, closing it, switching apps) forces an immediate
-// flush of whatever's pending — see wireLifecycleFlush() below.
+// Persistence. The previous version debounced the IndexedDB write, which
+// left a window where a killed/reloaded tab could lose whatever was typed
+// in that window — that's the bug where pasted content vanished. Fixed by
+// writing on every change instead of waiting: the in-memory copy updates
+// synchronously so nothing is ever lost even if the write itself hasn't
+// settled yet, and writes are chained (not parallel) so IndexedDB never
+// gets two overlapping transactions for the same file.
 // ---------------------------------------------------------------------------
-let saveTimer = null;
-let pending = null; // { path, content } — the most recent unsaved edit, if any
+let writeQueue = Promise.resolve();
+let saveGeneration = 0;
 
 function scheduleSave(path, content) {
-  pending = { path, content };
+  const f = state.files.get(path);
+  if (f) f.content = content; // authoritative immediately, not after the write settles
+
   state.dirty.add(path);
   setSaveIndicator("saving");
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(flushPendingSave, 250);
+
+  const gen = ++saveGeneration;
+  writeQueue = writeQueue
+    .then(() => state.vfs.writeFile(path, content))
+    .then(() => {
+      if (gen === saveGeneration) {
+        state.dirty.delete(path);
+        renderTabs();
+        setSaveIndicator("saved");
+      }
+    })
+    .catch((err) => {
+      console.error("Save failed:", err);
+      setSaveIndicator("error");
+    });
 }
 
-async function flushPendingSave() {
-  clearTimeout(saveTimer);
-  if (!pending) return;
-  const { path, content } = pending;
-  pending = null;
-  try {
-    await state.vfs.writeFile(path, content);
-    const f = state.files.get(path);
-    if (f) f.content = content;
-    state.dirty.delete(path);
-    renderTabs();
-    if (state.dirty.size === 0) setSaveIndicator("saved");
-  } catch (err) {
-    console.error("Save failed:", err);
-    setSaveIndicator("error");
-  }
-}
-
-// Force a save on every event that can precede the tab dying: losing
-// visibility (app-switch on tablets), losing focus, or actually unloading.
+// Belt-and-braces: still force everything to settle on any event that can
+// precede the tab dying. With write-through saves this is rarely doing real
+// work, but it costs nothing and covers edge cases (e.g. a slow write still
+// in flight when the tab is backgrounded).
 function wireLifecycleFlush() {
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) flushPendingSave();
-  });
-  window.addEventListener("pagehide", flushPendingSave);
-  window.addEventListener("blur", flushPendingSave);
-  window.addEventListener("beforeunload", flushPendingSave);
+  const flush = () => writeQueue;
+  document.addEventListener("visibilitychange", () => { if (document.hidden) flush(); });
+  window.addEventListener("pagehide", flush);
+  window.addEventListener("blur", flush);
+  window.addEventListener("beforeunload", flush);
 
-  // Explicit manual save — Ctrl/Cmd+S — for anyone using a keyboard case.
   window.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
       e.preventDefault();
-      flushPendingSave();
+      flush();
     }
   });
 }
@@ -254,7 +251,9 @@ function wireChrome() {
 
   document.getElementById("toggleTheme").addEventListener("click", toggleTheme);
 
-  document.getElementById("saveIndicator").addEventListener("click", () => flushPendingSave());
+  document.getElementById("saveIndicator").addEventListener("click", () => {
+    if (state.view && state.activePath) scheduleSave(state.activePath, state.view.state.doc.toString());
+  });
 
   const fsBtn = document.getElementById("fullscreenPreview");
   fsBtn.addEventListener("click", () => {
@@ -301,9 +300,57 @@ function wireChrome() {
       return;
     }
 
-    if (btn.dataset.action === "undo") { undo(view); view.focus(); }
-    if (btn.dataset.action === "redo") { redo(view); view.focus(); }
+    if (btn.dataset.action === "undo") { undo(view); view.focus(); return; }
+    if (btn.dataset.action === "redo") { redo(view); view.focus(); return; }
+    if (btn.dataset.action === "selectAll") {
+      view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+      view.focus();
+      return;
+    }
+    if (btn.dataset.action === "copy") { copySelection(view); return; }
+    if (btn.dataset.action === "cut") { cutSelection(view); return; }
+    if (btn.dataset.action === "paste") { pasteFromClipboard(view); return; }
   });
+}
+
+// Explicit clipboard actions. The native OS copy/paste bubble inside a
+// custom-rendered editor like CodeMirror is unreliable on some tablet
+// browsers, so these buttons are a guaranteed path that doesn't depend on
+// it — select the text with Select All (or a drag-select if that works for
+// you), then use these instead of waiting on a system menu to appear.
+async function copySelection(view) {
+  const { from, to } = view.state.selection.main;
+  const text = view.state.sliceDoc(from, to);
+  if (!text) { alert("Select some text first (try “A◻” to select the whole file)."); return; }
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    alert("Clipboard access was blocked by the browser. Check site permissions and try again.");
+  }
+}
+
+async function cutSelection(view) {
+  const { from, to } = view.state.selection.main;
+  const text = view.state.sliceDoc(from, to);
+  if (!text) { alert("Select some text first (try “A◻” to select the whole file)."); return; }
+  try {
+    await navigator.clipboard.writeText(text);
+    view.dispatch({ changes: { from, to, insert: "" } });
+    view.focus();
+  } catch {
+    alert("Clipboard access was blocked by the browser. Check site permissions and try again.");
+  }
+}
+
+async function pasteFromClipboard(view) {
+  try {
+    const text = await navigator.clipboard.readText();
+    const { from, to } = view.state.selection.main;
+    view.dispatch({ changes: { from, to, insert: text }, selection: { anchor: from + text.length } });
+    view.focus();
+  } catch {
+    alert("Couldn't read the clipboard. Your browser may need permission — check the site settings and try again.");
+  }
 }
 
 // ---------------------------------------------------------------------------
